@@ -1,0 +1,195 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String       @id @default(uuid())
+  email        String       @unique
+  passwordHash String
+  firstName    String
+  lastName     String
+  phone        String?
+  role         UserRole     @default(MEMBER)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  // Relationships
+  bands         BandMember[]
+  createdBands  Band[]
+  createdRehearsals Rehearsal[]
+  attendances   Attendance[]
+  resources     Resource[]
+  availability  Availability[]
+  notifications Notification[]
+
+  @@map("users")
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  MEMBER
+}
+
+model Band {
+  id          String   @id @default(uuid())
+  name        String
+  description String?
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Relationships
+  createdBy   User         @relation(fields: [createdById], references: [id])
+  members     BandMember[]
+  rehearsals  Rehearsal[]
+
+  @@map("bands")
+}
+
+model BandMember {
+  id         String         @id @default(uuid())
+  bandId     String
+  userId     String
+  role       String?
+  instrument String?
+  joinDate   DateTime       @default(now())
+  status     MemberStatus   @default(ACTIVE)
+
+  // Relationships
+  band       Band       @relation(fields: [bandId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([bandId, userId])
+  @@map("band_members")
+}
+
+enum MemberStatus {
+  ACTIVE
+  INACTIVE
+}
+
+model Rehearsal {
+  id                String     @id @default(uuid())
+  bandId            String
+  title             String
+  description       String?
+  location          String?
+  startTime         DateTime
+  endTime           DateTime
+  isRecurring       Boolean    @default(false)
+  recurrencePattern String?
+  createdById       String
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+  status            RehearsalStatus @default(SCHEDULED)
+
+  // Relationships
+  band              Band        @relation(fields: [bandId], references: [id], onDelete: Cascade)
+  createdBy         User        @relation(fields: [createdById], references: [id])
+  attendances       Attendance[]
+  resources         Resource[]
+  notifications     Notification[]
+
+  @@map("rehearsals")
+}
+
+enum RehearsalStatus {
+  SCHEDULED
+  CANCELLED
+  COMPLETED
+}
+
+model Attendance {
+  id           String           @id @default(uuid())
+  rehearsalId  String
+  userId       String
+  status       AttendanceStatus @default(UNDECIDED)
+  responseTime DateTime?
+  attended     Boolean?
+  notes        String?
+
+  // Relationships
+  rehearsal    Rehearsal    @relation(fields: [rehearsalId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([rehearsalId, userId])
+  @@map("attendance")
+}
+
+enum AttendanceStatus {
+  ATTENDING
+  MAYBE
+  NOT_ATTENDING
+  UNDECIDED
+}
+
+model Resource {
+  id          String       @id @default(uuid())
+  rehearsalId String
+  name        String
+  type        ResourceType
+  filePath    String
+  uploadedById String
+  uploadTime  DateTime     @default(now())
+
+  // Relationships
+  rehearsal   Rehearsal   @relation(fields: [rehearsalId], references: [id], onDelete: Cascade)
+  uploadedBy  User        @relation(fields: [uploadedById], references: [id])
+
+  @@map("resources")
+}
+
+enum ResourceType {
+  SETLIST
+  SHEET_MUSIC
+  RECORDING
+  NOTES
+}
+
+model Availability {
+  id              String   @id @default(uuid())
+  userId          String
+  dayOfWeek       Int // 0-6, Sunday to Saturday
+  startTime       String // 24-hour format, e.g. "14:00"
+  endTime         String // 24-hour format, e.g. "18:00"
+  preferenceWeight Int     @default(5) // 1-10, with 10 being most preferred
+
+  // Relationships
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("availability")
+}
+
+model Notification {
+  id           String             @id @default(uuid())
+  userId       String
+  rehearsalId  String?
+  type         NotificationType
+  content      String
+  createdAt    DateTime           @default(now())
+  readAt       DateTime?
+  sentAt       DateTime?
+
+  // Relationships
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rehearsal    Rehearsal?         @relation(fields: [rehearsalId], references: [id], onDelete: SetNull)
+
+  @@map("notifications")
+}
+
+enum NotificationType {
+  NEW_REHEARSAL
+  REMINDER
+  CANCELLATION
+  RESCHEDULED
+  ATTENDANCE_REQUIRED
+}
