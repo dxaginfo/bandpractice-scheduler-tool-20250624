@@ -1,142 +1,141 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import { prisma } from '../server';
+import { PrismaClient } from '@prisma/client';
+import { AuthError, ForbiddenError } from '../utils/errors';
 import { logger } from '../utils/logger';
 
-interface JwtPayload {
-  userId: string;
-  email: string;
-  firstName: string;
-  lastName: string;
-  role: string;
-}
+const prisma = new PrismaClient();
 
+// Augment the Express Request interface to include user property
 declare global {
   namespace Express {
     interface Request {
-      user?: JwtPayload;
+      user?: {
+        id: string;
+        email: string;
+        role: string;
+      };
     }
   }
 }
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
-
-// Middleware to authenticate user from JWT token
+/**
+ * Middleware to authenticate users via JWT
+ * Validates the access token and attaches user data to the request object
+ */
 export const authenticateUser = async (
   req: Request,
   res: Response,
   next: NextFunction
 ) => {
   try {
-    // Get token from header
+    // Get token from Authorization header
     const authHeader = req.headers.authorization;
-    
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ message: 'No token provided, authorization denied' });
+      throw new AuthError('Authentication token required');
     }
-    
+
     const token = authHeader.split(' ')[1];
-    
-    // Verify token
-    try {
-      const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload;
-      
-      // Add user data to request
-      req.user = decoded;
-      
-      next();
-    } catch (error) {
-      return res.status(401).json({ message: 'Token is invalid or expired' });
+    if (!token) {
+      throw new AuthError('Authentication token required');
     }
-  } catch (error) {
-    logger.error('Authentication error:', error);
-    return res.status(500).json({ message: 'Server error during authentication' });
-  }
-};
 
-// Middleware to check if user is admin
-export const isAdmin = (req: Request, res: Response, next: NextFunction) => {
-  if (req.user?.role !== 'ADMIN') {
-    return res.status(403).json({ message: 'Access denied, admin privileges required' });
-  }
-  next();
-};
+    // Verify the token
+    const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as {
+      id: string;
+      email: string;
+      role: string;
+    };
 
-// Middleware to check if user is manager or admin
-export const isManagerOrAdmin = (req: Request, res: Response, next: NextFunction) => {
-  if (req.user?.role !== 'MANAGER' && req.user?.role !== 'ADMIN') {
-    return res.status(403).json({ message: 'Access denied, manager privileges required' });
-  }
-  next();
-};
-
-// Middleware to check if user is authorized for band operations
-export const isBandMember = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const bandId = req.params.bandId;
-    const userId = req.user?.userId;
-    
-    if (!bandId || !userId) {
-      return res.status(400).json({ message: 'Band ID or user ID missing' });
-    }
-    
-    // Check if user is an admin (admins can access all bands)
-    if (req.user?.role === 'ADMIN') {
-      return next();
-    }
-    
-    // Check if user is a member of the band
-    const bandMember = await prisma.bandMember.findUnique({
-      where: {
-        bandId_userId: {
-          bandId,
-          userId,
-        },
-      },
+    // Find the user
+    const user = await prisma.user.findUnique({
+      where: { id: decoded.id },
+      select: { id: true, email: true, role: true, active: true }
     });
-    
-    if (!bandMember) {
-      return res.status(403).json({ message: 'Access denied, you are not a member of this band' });
+
+    if (!user || !user.active) {
+      throw new AuthError('User not found or deactivated');
     }
-    
+
+    // Attach user info to request object
+    req.user = {
+      id: user.id,
+      email: user.email,
+      role: user.role
+    };
+
     next();
   } catch (error) {
-    logger.error('Band member check error:', error);
-    return res.status(500).json({ message: 'Server error checking band membership' });
+    if (error instanceof jwt.JsonWebTokenError) {
+      return next(new AuthError('Invalid or expired token'));
+    }
+    next(error);
   }
 };
 
-// Middleware to check if user is band manager
-export const isBandManager = async (req: Request, res: Response, next: NextFunction) => {
+/**
+ * Middleware to restrict access based on user roles
+ * @param allowedRoles - Array of roles that have permission
+ */
+export const restrictTo = (allowedRoles: string[]) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return next(new AuthError('User not authenticated'));
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      logger.warn('Unauthorized access attempt', {
+        userId: req.user.id,
+        userRole: req.user.role,
+        requiredRoles: allowedRoles,
+        path: req.path,
+        method: req.method
+      });
+      
+      return next(new ForbiddenError());
+    }
+
+    next();
+  };
+};
+
+/**
+ * Middleware to check if user is a member of a band
+ */
+export const isBandMember = async (
+  req: Request,
+  res: Response,
+  next: NextFunction
+) => {
   try {
+    if (!req.user) {
+      return next(new AuthError('User not authenticated'));
+    }
+
     const bandId = req.params.bandId;
-    const userId = req.user?.userId;
-    
-    if (!bandId || !userId) {
-      return res.status(400).json({ message: 'Band ID or user ID missing' });
+    if (!bandId) {
+      return next(new ForbiddenError('Band ID is required'));
     }
-    
-    // Check if user is an admin (admins can access all bands)
-    if (req.user?.role === 'ADMIN') {
+
+    // Admins can access any band
+    if (req.user.role === 'ADMIN') {
       return next();
     }
-    
-    // Check if user is the creator of the band
-    const band = await prisma.band.findUnique({
-      where: { id: bandId },
+
+    // Check if user is a member of the band
+    const bandMember = await prisma.bandMember.findFirst({
+      where: {
+        bandId,
+        userId: req.user.id
+      }
     });
-    
-    if (!band) {
-      return res.status(404).json({ message: 'Band not found' });
+
+    if (!bandMember) {
+      return next(new ForbiddenError('You are not a member of this band'));
     }
-    
-    if (band.createdById === userId) {
-      return next();
-    }
-    
-    return res.status(403).json({ message: 'Access denied, band manager privileges required' });
+
+    next();
   } catch (error) {
-    logger.error('Band manager check error:', error);
-    return res.status(500).json({ message: 'Server error checking band manager status' });
+    next(error);
   }
 };
